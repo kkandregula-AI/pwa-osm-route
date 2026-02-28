@@ -163,6 +163,12 @@
   const SPEAK_WITHIN_METERS = 120;
   const VOICE_REPEAT_BLOCK_MS = 25000;
 
+  // ✅ Lane hint (positioning) ~300m before turns
+  const LANE_HINT_AT_METERS = 300;
+  const LANE_HINT_REPEAT_MS = 45000;
+  let lastLaneHintAt = 0;
+  let lastLaneHintStep = -1;
+
   const SPEED_LIMIT_KMH = 60;
   const OVER_SPEED_GRACE = 5;
 
@@ -504,6 +510,31 @@
 
   function showNavPanel(show){ navPanel.style.display = show ? "block" : "none"; }
 
+  // ✅ Lane hint (simple positioning)
+  function getLaneHintForStep(stepObj) {
+    const t = (stepObj.instruction || "").toLowerCase();
+    if (t.includes("turn left") || t.includes("keep left")) return "Keep left now.";
+    if (t.includes("turn right") || t.includes("keep right")) return "Keep right now.";
+    if (t.includes("roundabout")) return "Keep right and be ready to take your exit.";
+    if (t.includes("take the exit") || t.includes("off ramp")) return "Keep right for the exit.";
+    if (t.includes("take the ramp") || t.includes("on ramp")) return "Keep left for the ramp.";
+    return "";
+  }
+
+  function maybeSpeakLaneHint(stepIdx, distToNext, nowMs) {
+    if (distToNext > LANE_HINT_AT_METERS) return;
+    if (stepIdx === lastLaneHintStep) return;
+    if (nowMs - lastLaneHintAt < LANE_HINT_REPEAT_MS) return;
+
+    const hint = getLaneHintForStep(steps[stepIdx]);
+    if (!hint) return;
+
+    speak(hint);
+    setPillState("Lane hint: " + hint.replace(".", ""), "ok");
+    lastLaneHintAt = nowMs;
+    lastLaneHintStep = stepIdx;
+  }
+
   // Route progress lines
   function updateProgressLines(route, idx){
     if (!route || route.length < 2) return;
@@ -527,7 +558,7 @@
     if (!startLL || useGPSStart) {
       const pos = await getCurrentPosition();
       startLL = [pos.coords.latitude, pos.coords.longitude];
-      gpsLL = [...startLL]; // update bias cache
+      gpsLL = [...startLL];
       startMarker = setMarker(startMarker, startLL, "Start", "#111827");
       setUserLocation(startLL, pos.coords.accuracy);
     } else {
@@ -556,7 +587,6 @@
     routeDurationS = primary.duration;
     routeCoords = primary.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
 
-    // faint base + progress
     routeLine = L.polyline(routeCoords, { weight: 3, color: "#1e293b", opacity: 0.25 }).addTo(map);
     updateProgressLines(routeCoords, 0);
 
@@ -583,6 +613,8 @@
         buildStepsFromOSRM(alt);
         lastSpokenStep = -1;
         lastVoiceAt = 0;
+        lastLaneHintAt = 0;
+        lastLaneHintStep = -1;
 
         pillDist.textContent = "Distance: " + fmtDist(routeDistanceM);
         pillEta.textContent  = "ETA: " + fmtETA(routeDurationS);
@@ -664,7 +696,6 @@
       if (headingEnabled) applyRotation(currentHeadingDeg);
 
       setUserLocation(snappedPoint, pos.coords.accuracy);
-
       updateProgressLines(routeCoords, index);
 
       if (followMode) {
@@ -721,6 +752,10 @@
         navIn.textContent = "In " + fmtDist(distToNext);
         navRoad.textContent = "Road: " + (s.name || "—");
 
+        // ✅ lane positioning hint ~300m before the turn
+        maybeSpeakLaneHint(sIdx, distToNext, now);
+
+        // existing voice for instruction closer to the maneuver
         if (distToNext <= SPEAK_WITHIN_METERS && lastSpokenStep !== sIdx && (now - lastVoiceAt > VOICE_REPEAT_BLOCK_MS)) {
           speak(s.instruction);
           lastSpokenStep = sIdx;
@@ -806,6 +841,9 @@
 
     lastSpokenStep = -1;
     lastVoiceAt = 0;
+
+    lastLaneHintAt = 0;
+    lastLaneHintStep = -1;
 
     pillDist.textContent = "Distance: —";
     pillEta.textContent  = "ETA: —";
