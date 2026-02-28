@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+<title>DriveNav</title>
+
+<!-- iOS PWA Support -->
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="DriveNav"/>
+<meta name="theme-color" content="#111827"/>
+
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="data:,">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+body {
+  margin:0;
+  font-family:-apple-system, system-ui;
+  background:#f9fafb;
+  padding-bottom:env(safe-area-inset-bottom);
+}
+header {
+  background:#111827;
+  color:white;
+  padding:16px;
+  font-weight:800;
+}
+.controls {
+  padding:12px;
+  display:flex;
+  gap:10px;
+  flex-direction:column;
+}
+input {
+  padding:14px;
+  border-radius:14px;
+  border:1px solid #ddd;
+  font-size:16px;
+}
+button {
+  padding:14px;
+  border-radius:14px;
+  border:none;
+  font-weight:800;
+  font-size:15px;
+  background:#111827;
+  color:white;
+}
+button.secondary { background:#374151; }
+#map { height:55vh; }
+.navPanel {
+  padding:14px;
+  background:white;
+  border-top:1px solid #eee;
+  display:flex;
+  justify-content:space-between;
+  font-size:14px;
+}
+.badge {
+  background:#f3f4f6;
+  padding:6px 12px;
+  border-radius:999px;
+}
+</style>
+</head>
+<body>
+
+<header>DriveNav • Real-Time Navigation</header>
+
+<div class="controls">
+  <input id="destination" placeholder="Enter destination address"/>
+  <button id="routeBtn">Show Route</button>
+  <button id="navBtn" class="secondary">Start Navigation</button>
+</div>
+
+<div id="map"></div>
+
+<div class="navPanel" id="navPanel" style="display:none;">
+  <div class="badge" id="distance">Distance: --</div>
+  <div class="badge" id="eta">ETA: --</div>
+  <div class="badge" id="status">On Route</div>
+</div>
+
+<script>
+const map = L.map("map",{zoomControl:true}).setView([19.076,72.8777],12);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{
+  maxZoom:19,
+  attribution:"© OpenStreetMap"
+}).addTo(map);
+
+let routeLine=null;
+let userMarker=null;
+let routeCoords=[];
+let routeDuration=0;
+let watchId=null;
+
+function haversine(a,b){
+  const R=6371000;
+  const toRad=x=>x*Math.PI/180;
+  const dLat=toRad(b[0]-a[0]);
+  const dLon=toRad(b[1]-a[1]);
+  const lat1=toRad(a[0]);
+  const lat2=toRad(b[0]);
+  const s=Math.sin(dLat/2)**2+Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+
+function nearestIndex(point){
+  let best=0, bestDist=Infinity;
+  routeCoords.forEach((c,i)=>{
+    const d=haversine(point,c);
+    if(d<bestDist){bestDist=d;best=i;}
+  });
+  return {index:best,distance:bestDist};
+}
+
+async function geocode(q){
+  const res=await fetch("https://nominatim.openstreetmap.org/search?format=json&q="+encodeURIComponent(q));
+  return await res.json();
+}
+
+async function getCurrent(){
+  return new Promise((resolve,reject)=>{
+    navigator.geolocation.getCurrentPosition(
+      pos=>resolve([pos.coords.latitude,pos.coords.longitude]),
+      err=>reject(err),
+      {enableHighAccuracy:true,timeout:20000}
+    );
+  });
+}
+
+async function buildRoute(start,dest){
+  const url=`https://router.project-osrm.org/route/v1/driving/${start[1]},${start[0]};${dest[1]},${dest[0]}?overview=full&geometries=geojson`;
+  const res=await fetch(url);
+  const data=await res.json();
+  const r=data.routes[0];
+  routeDuration=r.duration;
+  routeCoords=r.geometry.coordinates.map(c=>[c[1],c[0]]);
+  if(routeLine) map.removeLayer(routeLine);
+  routeLine=L.polyline(routeCoords,{weight:5,color:"#2563eb"}).addTo(map);
+  map.fitBounds(routeLine.getBounds());
+}
+
+document.getElementById("routeBtn").onclick=async()=>{
+  const destText=document.getElementById("destination").value;
+  if(!destText) return alert("Enter destination");
+  const start=await getCurrent();
+  const destData=await geocode(destText);
+  const dest=[Number(destData[0].lat),Number(destData[0].lon)];
+  await buildRoute(start,dest);
+  alert("Route Ready");
+};
+
+document.getElementById("navBtn").onclick=()=>{
+  if(!routeCoords.length) return alert("Build route first");
+  if(watchId){
+    navigator.geolocation.clearWatch(watchId);
+    watchId=null;
+    document.getElementById("navBtn").innerText="Start Navigation";
+    document.getElementById("navPanel").style.display="none";
+    return;
+  }
+  document.getElementById("navPanel").style.display="flex";
+  document.getElementById("navBtn").innerText="Stop Navigation";
+
+  watchId=navigator.geolocation.watchPosition(pos=>{
+    const me=[pos.coords.latitude,pos.coords.longitude];
+    if(userMarker) map.removeLayer(userMarker);
+    userMarker=L.circleMarker(me,{radius:8,color:"#2563eb"}).addTo(map);
+    map.setView(me,16);
+
+    const {index,distance}=nearestIndex(me);
+    document.getElementById("status").innerText=distance>60?"Off Route":"On Route";
+
+    let remaining=0;
+    for(let i=index;i<routeCoords.length-1;i++){
+      remaining+=haversine(routeCoords[i],routeCoords[i+1]);
+    }
+    document.getElementById("distance").innerText="Distance: "+(remaining/1000).toFixed(1)+" km";
+    document.getElementById("eta").innerText="ETA: "+Math.round((remaining/(routeDuration||10))/60)+" min";
+
+  },err=>alert(err.message),{enableHighAccuracy:true});
+};
+</script>
+</body>
+</html>
