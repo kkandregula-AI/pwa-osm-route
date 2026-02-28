@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+ <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8"/>
@@ -21,7 +21,7 @@ header{background:#111827;color:#fff;padding:14px;font-weight:900}
 #map{height:55vh}
 .controls{padding:12px}
 input{width:100%;padding:12px;border-radius:12px;border:1px solid #ddd;margin-bottom:8px}
-button{padding:12px;border:none;border-radius:12px;background:#111827;color:#fff;font-weight:800;margin-right:6px}
+button{padding:12px;border:none;border-radius:12px;background:#111827;color:#fff;font-weight:800;margin-right:6px;margin-top:4px}
 .status{margin-top:10px;font-weight:700}
 .turn{background:#0b1220;color:#fff;padding:12px;border-radius:14px;margin-top:10px;display:none}
 .turn h3{margin:0 0 6px 0;font-size:14px}
@@ -61,11 +61,17 @@ const NOMINATIM="https://nominatim.openstreetmap.org/search?format=json&limit=1&
 
 let routeLine=null,userMarker=null,startLL=null,destLL=null;
 let routeCoords=[],routeDuration=0,routeDistance=0;
-let watchId=null,steps=[],cumDist=[];
+let watchId=null,steps=[],lastSpokenStep=-1;
 let rerouting=false,lastReroute=0,offCount=0;
+
+let lastGPS=null;
+let overSpeedSpokenAt=0;
+const SPEED_LIMIT_KMH=60;
 
 const OFF_METERS=60;
 const COOLDOWN=20000;
+const SPEAK_WITHIN_METERS=120;
+const CACHE_KEY="drivenav_last_route_v2";
 
 function speak(text){
   if(!window.speechSynthesis) return;
@@ -107,34 +113,64 @@ function snap(point){
   return {snapped:best,distance:bestDist,index};
 }
 
-function buildSteps(json){
-  const raw=json.routes[0].legs[0].steps||[];
-  let acc=0;
-  steps=raw.map(s=>{
-    acc+=s.distance;
-    return {instruction:s.maneuver.type+" "+(s.name||""),distance:s.distance,cum:acc};
-  });
+function naturalInstruction(step){
+  const m=step.maneuver||{};
+  const road=step.name||"";
+  const onto=road?` onto ${road}`:"";
+  if(m.type==="arrive") return "You have arrived at your destination";
+  if(m.type==="turn") return `Turn ${m.modifier||""}${onto}`.trim();
+  if(m.type==="merge") return `Merge${onto}`;
+  if(m.type==="continue") return `Continue${onto}`;
+  if(m.type==="fork") return `Keep ${m.modifier||""}${onto}`.trim();
+  if(m.type==="roundabout") return "Enter the roundabout";
+  return `${m.type||"Proceed"}${onto}`;
 }
 
-function remaining(index){
-  let sum=0;
-  for(let i=index;i<routeCoords.length-1;i++)
-    sum+=hav(routeCoords[i],routeCoords[i+1]);
-  return sum;
+function buildSteps(json){
+  const raw=json.routes[0].legs[0].steps||[];
+  steps=raw.map(s=>({
+    instruction:naturalInstruction(s),
+    distance:s.distance,
+    maneuver:s.maneuver,
+    name:s.name
+  }));
+}
+
+function saveRoute(){
+  localStorage.setItem(CACHE_KEY,JSON.stringify({
+    routeCoords,routeDuration,routeDistance,steps,destLL
+  }));
+}
+
+function loadRoute(){
+  const raw=localStorage.getItem(CACHE_KEY);
+  if(!raw) return;
+  const data=JSON.parse(raw);
+  routeCoords=data.routeCoords||[];
+  routeDuration=data.routeDuration||0;
+  routeDistance=data.routeDistance||0;
+  steps=data.steps||[];
+  destLL=data.destLL||null;
+
+  if(routeCoords.length){
+    routeLine=L.polyline(routeCoords,{color:"#2563eb",weight:6}).addTo(map);
+    map.fitBounds(routeLine.getBounds());
+    document.getElementById("navBtn").disabled=false;
+  }
 }
 
 async function route(){
   if(!destLL) return alert("Enter destination");
-  if(!startLL){
-    const pos=await new Promise((res,rej)=>{
-      navigator.geolocation.getCurrentPosition(p=>res([p.coords.latitude,p.coords.longitude]),rej,{enableHighAccuracy:true});
-    });
-    startLL=pos;
-  }
+
+  const pos=await new Promise((res,rej)=>{
+    navigator.geolocation.getCurrentPosition(p=>res([p.coords.latitude,p.coords.longitude]),rej,{enableHighAccuracy:true});
+  });
+  startLL=pos;
 
   const url=OSRM+`${startLL[1]},${startLL[0]};${destLL[1]},${destLL[0]}?overview=full&geometries=geojson&steps=true`;
   const r=await fetch(url).then(r=>r.json());
   const data=r.routes[0];
+
   routeDuration=data.duration;
   routeDistance=data.distance;
   routeCoords=data.geometry.coordinates.map(c=>[c[1],c[0]]);
@@ -144,23 +180,18 @@ async function route(){
   map.fitBounds(routeLine.getBounds());
 
   buildSteps(r);
+  saveRoute();
 
   document.getElementById("distance").innerText="Distance: "+(routeDistance/1000).toFixed(1)+" km";
   document.getElementById("eta").innerText="ETA: "+Math.round(routeDuration/60)+" min";
   document.getElementById("navBtn").disabled=false;
 }
 
-async function autoReroute(current){
-  if(rerouting||Date.now()-lastReroute<COOLDOWN) return;
-  rerouting=true; lastReroute=Date.now();
-  startLL=current;
-  await route();
-  rerouting=false;
-}
-
 function startNav(){
   watchId=navigator.geolocation.watchPosition(pos=>{
     const me=[pos.coords.latitude,pos.coords.longitude];
+    const now=Date.now();
+
     const {snapped,distance,index}=snap(me);
 
     if(userMarker) map.removeLayer(userMarker);
@@ -170,22 +201,51 @@ function startNav(){
     const off=distance>OFF_METERS;
     if(off) offCount++; else offCount=0;
 
-    if(offCount>=3) autoReroute(me);
+    if(offCount>=3 && now-lastReroute>COOLDOWN){
+      lastReroute=now;
+      route();
+    }
 
-    const rem=remaining(index);
+    let speed=pos.coords.speed;
+    if(!Number.isFinite(speed) && lastGPS){
+      const dt=(now-lastGPS.t)/1000;
+      if(dt>0.5){
+        const d=hav(lastGPS.ll,me);
+        speed=d/dt;
+      }
+    }
+    lastGPS={ll:me,t:now};
+    const speedKmh=speed?speed*3.6:null;
+
+    if(speedKmh && speedKmh>SPEED_LIMIT_KMH+5){
+      document.getElementById("state").innerText="Over speed!";
+      if(now-overSpeedSpokenAt>30000){
+        speak("You are over speed limit");
+        overSpeedSpokenAt=now;
+      }
+    }else{
+      document.getElementById("state").innerText=off?"Off route":"On route";
+    }
+
+    const rem=routeDistance*(1-index/routeCoords.length);
     document.getElementById("distance").innerText="Distance: "+(rem/1000).toFixed(1)+" km";
     const eta=rem/(routeDistance/routeDuration);
     document.getElementById("eta").innerText="ETA: "+Math.round(eta/60)+" min";
-    document.getElementById("state").innerText=off?"Off route":"On route";
 
-    // Turn instruction logic
     let traveled=routeDistance-rem;
-    let stepIndex=steps.findIndex(s=>traveled<=s.cum);
-    if(stepIndex>=0){
-      const step=steps[stepIndex];
-      document.getElementById("turnPanel").style.display="block";
-      document.getElementById("turnText").innerText=step.instruction;
-      if(rem<step.distance+50) speak(step.instruction);
+    let acc=0;
+    for(let i=0;i<steps.length;i++){
+      acc+=steps[i].distance;
+      if(traveled<=acc){
+        document.getElementById("turnPanel").style.display="block";
+        document.getElementById("turnText").innerText=steps[i].instruction;
+        const distToTurn=acc-traveled;
+        if(distToTurn<=SPEAK_WITHIN_METERS && lastSpokenStep!==i){
+          speak(steps[i].instruction);
+          lastSpokenStep=i;
+        }
+        break;
+      }
     }
 
   },err=>alert(err.message),{enableHighAccuracy:true});
@@ -205,13 +265,15 @@ document.getElementById("clearBtn").onclick=()=>{
   if(watchId) navigator.geolocation.clearWatch(watchId);
   map.eachLayer(l=>{if(l instanceof L.Polyline||l instanceof L.CircleMarker) map.removeLayer(l);});
   routeCoords=[]; steps=[];
+  localStorage.removeItem(CACHE_KEY);
   document.getElementById("navBtn").disabled=true;
   document.getElementById("turnPanel").style.display="none";
   document.getElementById("distance").innerText="Distance: —";
   document.getElementById("eta").innerText="ETA: —";
   document.getElementById("state").innerText="Ready";
 };
-</script>
 
+loadRoute();
+</script>
 </body>
 </html>
