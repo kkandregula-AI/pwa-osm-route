@@ -38,13 +38,23 @@
   .btn.ghost{background:#eef2ff;color:var(--brand)}
   .btn:disabled{opacity:.45;cursor:not-allowed}
 
-  /* Taller map on mobile */
+  #mapWrap{position:relative}
   #map{height:56vh;border-top:1px solid var(--line)}
   @media (max-width: 520px){
     #map{height:62vh;}
     .sheet{padding:10px;}
     .btn{min-width:100px;}
   }
+
+  /* Rotate the entire map pane (Google-like) */
+  .map-rotate{transform-origin: 50% 50%;}
+  .compassBtn{
+    position:absolute; right:12px; top:12px; z-index:2500;
+    background:#fff; border:1px solid var(--line); border-radius:14px;
+    padding:10px 12px; font-weight:900; cursor:pointer;
+    box-shadow:0 12px 24px rgba(15,23,42,.12);
+  }
+  .compassBtn small{display:block; font-weight:800; color:var(--muted); margin-top:2px}
 
   .pillRow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
   .pill{background:#f1f5f9;padding:7px 10px;border-radius:999px;font-size:13px;font-weight:900}
@@ -57,7 +67,6 @@
   .sItem:last-child{border-bottom:none}
   .sItem:hover{background:#f8fafc}
 
-  /* Navigation bottom panel (mobile-friendly) */
   .navPanel{
     position:fixed; left:12px; right:12px;
     bottom:calc(env(safe-area-inset-bottom) + 12px);
@@ -67,7 +76,7 @@
     border:1px solid rgba(255,255,255,.08);
     box-shadow:0 16px 40px rgba(2,6,23,.35);
     display:none;
-    z-index:2000;
+    z-index:3000;
   }
   .navTop{display:flex; justify-content:space-between; align-items:flex-start; gap:10px;}
   .navTitle{font-size:12px; opacity:.8; font-weight:900; letter-spacing:.3px;}
@@ -90,7 +99,7 @@
       <div class="field" id="startField">
         <label>Start</label>
         <input id="startInput" autocomplete="off"/>
-        <div class="hint">Tap “Use GPS” or type an address.</div>
+        <div class="hint">Nearby suggestions are prioritized using your GPS.</div>
         <div id="startSug" class="suggest"></div>
       </div>
 
@@ -119,9 +128,11 @@
   </div>
 </div>
 
-<div id="map"></div>
+<div id="mapWrap">
+  <button class="compassBtn" id="btnCompass">🧭 <small>Heading</small></button>
+  <div id="map"></div>
+</div>
 
-<!-- Mobile-first Navigation Panel -->
 <div class="navPanel" id="navPanel">
   <div class="navTop">
     <div>
@@ -142,11 +153,9 @@
 </div>
 
 <script>
-  // --- Endpoints ---
   const OSRM = "https://router.project-osrm.org/route/v1/driving/";
   const NOMINATIM = "https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&q=";
 
-  // --- Config ---
   const OFF_ROUTE_METERS = 60;
   const OFF_ROUTE_HITS_TO_REROUTE = 3;
   const REROUTE_COOLDOWN_MS = 20000;
@@ -157,7 +166,8 @@
   const SPEED_LIMIT_KMH = 60;
   const OVER_SPEED_GRACE = 5;
 
-  // --- UI ---
+  const DEFAULT_START_TEXT = "Current Location";
+
   const startInput = document.getElementById("startInput");
   const destInput  = document.getElementById("destInput");
   const startSug   = document.getElementById("startSug");
@@ -175,7 +185,6 @@
   const pillSpeed  = document.getElementById("pillSpeed");
   const pillState  = document.getElementById("pillState");
 
-  // Nav Panel
   const navPanel = document.getElementById("navPanel");
   const navInstr = document.getElementById("navInstr");
   const navIn    = document.getElementById("navIn");
@@ -183,50 +192,65 @@
   const navSpeed = document.getElementById("navSpeed");
   const navStatus= document.getElementById("navStatus");
   const btnRecenter = document.getElementById("btnRecenter");
-  const btnStopNav = document.getElementById("btnStopNav");
+  const btnStopNav  = document.getElementById("btnStopNav");
 
-  // --- Map ---
+  const btnCompass = document.getElementById("btnCompass");
+
+  // Map
   const map = L.map("map", { zoomControl: true }).setView([19.076, 72.8777], 12);
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap contributors" }).addTo(map);
 
-  // Smooth follow mode
-  let followMode = true;
+  // Rotation panes
+  const mapPane = map.getPane("mapPane");
+  const overlayPane = map.getPane("overlayPane");
+  const markerPane = map.getPane("markerPane");
+  const shadowPane = map.getPane("shadowPane");
 
-  // --- State ---
-  const DEFAULT_START_TEXT = "Current Location";
+  let headingEnabled = true;
+  let currentHeadingDeg = 0;
+
+  function applyRotation(deg){
+    const r = `rotate(${-deg}deg)`;
+    [mapPane, overlayPane, markerPane, shadowPane].forEach(p=>{
+      if(!p) return;
+      p.classList.add("map-rotate");
+      p.style.transform = r;
+    });
+  }
+
+  btnCompass.onclick = () => {
+    headingEnabled = !headingEnabled;
+    if (!headingEnabled) {
+      applyRotation(0);
+      btnCompass.innerHTML = "🧭 <small>North up</small>";
+    } else {
+      applyRotation(currentHeadingDeg);
+      btnCompass.innerHTML = "🧭 <small>Heading</small>";
+    }
+  };
+
+  // GPS bias cache (for relevant suggestions)
+  let gpsLL = null; // [lat, lon]
+
+  // State
   startInput.value = DEFAULT_START_TEXT;
+  let startLL=null, destLL=null;
+  let startMarker=null, destMarker=null;
+  let userDot=null, accCircle=null;
+  let routeLine=null, altLines=[];
+  let routeAheadLine=null, routeDoneLine=null;
 
-  let startLL = null;        // [lat, lon]
-  let destLL  = null;
+  let routeCoords=[], routeDistanceM=0, routeDurationS=0;
+  let steps=[], lastSpokenStep=-1, lastVoiceAt=0;
 
-  let startMarker = null;
-  let destMarker  = null;
-  let userMarker  = null;
+  let watchId=null;
+  let followMode=true;
 
-  let routeLine = null;
-  let altLines = [];
+  let rerouting=false, lastRerouteAt=0, offRouteCount=0;
 
-  let routeCoords = [];
-  let routeDistanceM = 0;
-  let routeDurationS = 0;
+  let lastGPS=null, overSpeedSpokenAt=0;
 
-  // Steps: {instruction, distance, cum, name}
-  let steps = [];
-  let lastSpokenStep = -1;
-  let lastVoiceAt = 0;
-
-  let watchId = null;
-
-  // Auto reroute
-  let rerouting = false;
-  let lastRerouteAt = 0;
-  let offRouteCount = 0;
-
-  // Speed
-  let lastGPS = null;
-  let overSpeedSpokenAt = 0;
-
-  // --- Helpers ---
+  // Helpers
   function setPillState(text, kind="ok") {
     pillState.textContent = text;
     pillState.className = "pill " + (kind === "bad" ? "bad" : "ok");
@@ -255,6 +279,20 @@
     return 2 * R * Math.asin(Math.sqrt(s));
   }
 
+  function kmToDegLat(km) { return km / 110.574; }
+  function kmToDegLon(km, lat) { return km / (111.320 * Math.cos((lat * Math.PI) / 180)); }
+
+  async function ensureGpsLL() {
+    if (gpsLL) return gpsLL;
+    try {
+      const pos = await getCurrentPosition();
+      gpsLL = [pos.coords.latitude, pos.coords.longitude];
+      return gpsLL;
+    } catch {
+      return null;
+    }
+  }
+
   function setMarker(existing, latlng, label, color) {
     if (existing) map.removeLayer(existing);
     if (!latlng) return null;
@@ -271,19 +309,27 @@
     return m;
   }
 
+  function setUserLocation(latlng, accuracyM){
+    if (accCircle) map.removeLayer(accCircle);
+    if (accuracyM && Number.isFinite(accuracyM) && accuracyM > 0) {
+      accCircle = L.circle(latlng, { radius: accuracyM, color: "#60a5fa", weight: 1, fillColor: "#60a5fa", fillOpacity: 0.15 }).addTo(map);
+    }
+    if (userDot) map.removeLayer(userDot);
+    userDot = L.circleMarker(latlng, { radius: 7, color: "#2563eb", weight: 2, fillColor:"#2563eb", fillOpacity: 1 }).addTo(map);
+  }
+
   function routeTotalDistance(route){
     let sum = 0;
     for (let i=0;i<route.length-1;i++) sum += haversineMeters(route[i], route[i+1]);
     return sum;
   }
-
   function remainingDistance(route, fromIndex) {
     let sum = 0;
     for (let i = fromIndex; i < route.length - 1; i++) sum += haversineMeters(route[i], route[i + 1]);
     return sum;
   }
 
-  // --- Snap-to-route ---
+  // Snap-to-route
   function projectPointOnSegment(p, a, b) {
     const toXY = ([lat, lon]) => [lon, lat];
     const P = toXY(p), A = toXY(a), B = toXY(b);
@@ -308,7 +354,7 @@
     return { snapped: bestPoint, distance: bestDist, index: bestIndex };
   }
 
-  // --- Suggestions ---
+  // Suggestions
   function debounce(fn, wait) {
     let t = null;
     return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
@@ -332,27 +378,56 @@
     if (!document.getElementById("destField").contains(e.target))  destSug.style.display = "none";
   });
 
+  // Position
   async function getCurrentPosition() {
     return new Promise((resolve, reject) => {
       navigator.geolocation.getCurrentPosition(
-        (pos) => resolve([pos.coords.latitude, pos.coords.longitude]),
+        (pos) => resolve(pos),
         (err) => reject(err),
         { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
       );
     });
   }
 
-  async function geocode(q) {
-    const r = await fetch(NOMINATIM + encodeURIComponent(q), { headers: { "Accept": "application/json" } });
+  // GPS-biased geocode (nearby results first)
+  async function geocode(q, biasLL) {
+    let url = NOMINATIM + encodeURIComponent(q);
+    url += "&accept-language=en&addressdetails=1";
+
+    if (biasLL && Number.isFinite(biasLL[0]) && Number.isFinite(biasLL[1])) {
+      const lat = biasLL[0], lon = biasLL[1];
+      const km = 25;
+      const dLat = kmToDegLat(km);
+      const dLon = kmToDegLon(km, lat);
+
+      const left = lon - dLon, right = lon + dLon;
+      const top = lat + dLat, bottom = lat - dLat;
+
+      url += `&viewbox=${left},${top},${right},${bottom}&bounded=0`;
+    }
+
+    const r = await fetch(url, { headers: { "Accept": "application/json" } });
     if (!r.ok) throw new Error("Geocode HTTP " + r.status);
-    return await r.json();
+
+    const data = await r.json();
+
+    if (biasLL && Array.isArray(data)) {
+      return [...data].sort((a,b)=>{
+        const aLL = [Number(a.lat), Number(a.lon)];
+        const bLL = [Number(b.lat), Number(b.lon)];
+        return haversineMeters(biasLL, aLL) - haversineMeters(biasLL, bLL);
+      });
+    }
+
+    return data;
   }
 
   const searchStart = debounce(async () => {
     const q = startInput.value.trim();
     if (!q || q === DEFAULT_START_TEXT || q.length < 3) return showSuggestions(startSug, [], ()=>{});
     try {
-      const data = await geocode(q);
+      const bias = await ensureGpsLL();
+      const data = await geocode(q, bias);
       showSuggestions(startSug, data || [], (it) => {
         startLL = [Number(it.lat), Number(it.lon)];
         startInput.value = it.display_name;
@@ -364,35 +439,23 @@
 
   const searchDest = debounce(async () => {
     const q = destInput.value.trim();
-    if (q.length < 3) { destHint.textContent = "Type 3+ chars to see suggestions."; return showSuggestions(destSug, [], ()=>{}); }
-    destHint.textContent = "Searching…";
+    if (q.length < 3) return showSuggestions(destSug, [], ()=>{});
     try {
-      const data = await geocode(q);
-      const items = data || [];
-      destHint.textContent = items.length ? "Tap a suggestion." : "No results.";
-      showSuggestions(destSug, items, (it) => {
+      const bias = await ensureGpsLL();
+      const data = await geocode(q, bias);
+      showSuggestions(destSug, data || [], (it) => {
         destLL = [Number(it.lat), Number(it.lon)];
         destInput.value = it.display_name;
         destMarker = setMarker(destMarker, destLL, "Destination", "#e11d48");
         setPillState("Destination set", "ok");
       });
-    } catch {
-      destHint.textContent = "Search failed.";
-      showSuggestions(destSug, [], ()=>{});
-    }
+    } catch { showSuggestions(destSug, [], ()=>{}); }
   }, 300);
 
-  startInput.addEventListener("focus", () => {
-    if (startInput.value === DEFAULT_START_TEXT) startInput.select();
-  });
-  startInput.addEventListener("blur", () => {
-    if (!startInput.value.trim()) startInput.value = DEFAULT_START_TEXT;
-  });
-  startInput.addEventListener("input", () => { searchStart(); });
+  startInput.addEventListener("input", () => searchStart());
+  destInput.addEventListener("input", () => { destLL=null; searchDest(); });
 
-  destInput.addEventListener("input", () => { destLL = null; searchDest(); });
-
-  // --- Natural instructions (OSRM) ---
+  // Natural instructions
   function naturalInstruction(step){
     const m = step.maneuver || {};
     const type = m.type || "";
@@ -433,7 +496,6 @@
     for (let i=0;i<steps.length;i++) if (traveledM <= steps[i].cum) return i;
     return Math.max(0, steps.length - 1);
   }
-
   function stepDistanceRemaining(traveledM, stepIdx){
     const prevCum = stepIdx === 0 ? 0 : steps[stepIdx - 1].cum;
     const within = traveledM - prevCum;
@@ -442,19 +504,32 @@
 
   function showNavPanel(show){ navPanel.style.display = show ? "block" : "none"; }
 
-  // --- Route with alternatives ---
+  // Route progress lines
+  function updateProgressLines(route, idx){
+    if (!route || route.length < 2) return;
+
+    const done = route.slice(0, Math.max(2, idx+1));
+    const ahead = route.slice(Math.max(0, idx), route.length);
+
+    if (routeDoneLine) map.removeLayer(routeDoneLine);
+    if (routeAheadLine) map.removeLayer(routeAheadLine);
+
+    routeDoneLine = L.polyline(done, { weight: 6, color: "#60a5fa", opacity: 0.35 }).addTo(map);
+    routeAheadLine = L.polyline(ahead, { weight: 7, color: "#2563eb", opacity: 1 }).addTo(map);
+  }
+
+  // Fetch route + alternatives
   async function fetchRoute() {
     if (!destLL) throw new Error("Pick a destination from suggestions.");
 
-    // Start resolution:
-    // If user typed a real address, startLL comes from selection.
-    // If start is default/current location, use GPS.
-    const startText = startInput.value.trim();
-    const useGPSStart = (!startText || startText === DEFAULT_START_TEXT);
+    const useGPSStart = (!startInput.value.trim() || startInput.value.trim() === DEFAULT_START_TEXT);
 
     if (!startLL || useGPSStart) {
-      startLL = await getCurrentPosition();
+      const pos = await getCurrentPosition();
+      startLL = [pos.coords.latitude, pos.coords.longitude];
+      gpsLL = [...startLL]; // update bias cache
       startMarker = setMarker(startMarker, startLL, "Start", "#111827");
+      setUserLocation(startLL, pos.coords.accuracy);
     } else {
       startMarker = setMarker(startMarker, startLL, "Start", "#111827");
     }
@@ -467,20 +542,23 @@
     const json = await res.json();
     if (!json.routes || !json.routes.length) throw new Error("No route found.");
 
-    // Clear old
     if (routeLine) map.removeLayer(routeLine);
     altLines.forEach(l => map.removeLayer(l));
     altLines = [];
+    if (routeDoneLine) map.removeLayer(routeDoneLine), routeDoneLine=null;
+    if (routeAheadLine) map.removeLayer(routeAheadLine), routeAheadLine=null;
 
     const routes = json.routes;
 
-    // Primary route
+    // Primary
     const primary = routes[0];
     routeDistanceM = primary.distance;
     routeDurationS = primary.duration;
     routeCoords = primary.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
 
-    routeLine = L.polyline(routeCoords, { weight: 6, color: "#2563eb" }).addTo(map);
+    // faint base + progress
+    routeLine = L.polyline(routeCoords, { weight: 3, color: "#1e293b", opacity: 0.25 }).addTo(map);
+    updateProgressLines(routeCoords, 0);
 
     // Alternatives
     for (let i=1;i<routes.length;i++){
@@ -489,21 +567,20 @@
 
       const altLine = L.polyline(altCoords, { weight: 5, color: "#94a3b8", opacity: 0.9 }).addTo(map);
       altLine.on("click", () => {
-        // Make alt primary
         if (routeLine) map.removeLayer(routeLine);
         altLines.forEach(l => map.removeLayer(l));
         altLines = [];
+        if (routeDoneLine) map.removeLayer(routeDoneLine), routeDoneLine=null;
+        if (routeAheadLine) map.removeLayer(routeAheadLine), routeAheadLine=null;
 
         routeCoords = altCoords;
         routeDistanceM = alt.distance;
         routeDurationS = alt.duration;
 
-        routeLine = L.polyline(routeCoords, { weight: 6, color: "#2563eb" }).addTo(map);
+        routeLine = L.polyline(routeCoords, { weight: 3, color: "#1e293b", opacity: 0.25 }).addTo(map);
+        updateProgressLines(routeCoords, 0);
 
-        // Rebuild steps from selected route
         buildStepsFromOSRM(alt);
-
-        // Reset voice
         lastSpokenStep = -1;
         lastVoiceAt = 0;
 
@@ -517,7 +594,7 @@
 
     destMarker = setMarker(destMarker, destLL, "Destination", "#e11d48");
 
-    map.fitBounds(routeLine.getBounds(), { padding: [24, 24] });
+    map.fitBounds(L.polyline(routeCoords).getBounds(), { padding: [24, 24] });
 
     pillDist.textContent = "Distance: " + fmtDist(routeDistanceM);
     pillEta.textContent  = "ETA: " + fmtETA(routeDurationS);
@@ -527,15 +604,10 @@
     buildStepsFromOSRM(primary);
     btnNav.disabled = false;
 
-    // nav panel initial
     if (steps.length) {
       navInstr.textContent = steps[0].instruction;
       navIn.textContent = "In " + fmtDist(steps[0].distance);
       navRoad.textContent = "Road: " + (steps[0].name || "—");
-    } else {
-      navInstr.textContent = "No steps available";
-      navIn.textContent = "In —";
-      navRoad.textContent = "Road: —";
     }
   }
 
@@ -565,6 +637,7 @@
     watchId = null;
     btnNav.textContent = "Start Nav";
     showNavPanel(false);
+    applyRotation(0);
     setPillState("Navigation stopped", "ok");
   }
 
@@ -581,7 +654,24 @@
       const me = [pos.coords.latitude, pos.coords.longitude];
       const now = Date.now();
 
-      // speed
+      const snap = snapToRoute(me, routeCoords);
+      const snappedPoint = snap.snapped;
+      const offDistance = snap.distance;
+      const index = snap.index;
+
+      const heading = (typeof pos.coords.heading === "number" && pos.coords.heading >= 0) ? pos.coords.heading : currentHeadingDeg;
+      currentHeadingDeg = heading;
+      if (headingEnabled) applyRotation(currentHeadingDeg);
+
+      setUserLocation(snappedPoint, pos.coords.accuracy);
+
+      updateProgressLines(routeCoords, index);
+
+      if (followMode) {
+        const zoom = Math.max(map.getZoom(), 16);
+        map.setView(snappedPoint, zoom, { animate: true });
+      }
+
       let speedMps = pos.coords.speed;
       if (!Number.isFinite(speedMps) && lastGPS) {
         const dt = (now - lastGPS.t) / 1000;
@@ -596,21 +686,6 @@
       pillSpeed.textContent = "Speed: " + (speedKmh == null ? "—" : Math.round(speedKmh) + " km/h");
       navSpeed.textContent  = "Speed: " + (speedKmh == null ? "—" : Math.round(speedKmh) + " km/h");
 
-      // snap
-      const snap = snapToRoute(me, routeCoords);
-      const snappedPoint = snap.snapped;
-      const offDistance = snap.distance;
-      const index = snap.index;
-
-      userMarker = setMarker(userMarker, snappedPoint, "You", "#2563eb");
-
-      // smooth follow + zoom
-      if (followMode) {
-        const zoom = Math.max(map.getZoom(), 16);
-        map.setView(snappedPoint, zoom, { animate: true });
-      }
-
-      // off route
       const off = offDistance > OFF_ROUTE_METERS;
       offRouteCount = off ? (offRouteCount + 1) : 0;
 
@@ -620,7 +695,6 @@
       const etaSec = avgSpeedMps > 0 ? (rem / avgSpeedMps) : null;
       pillEta.textContent = "ETA: " + (etaSec ? fmtETA(etaSec) : fmtETA(routeDurationS));
 
-      // overspeed
       const over = (speedKmh != null && speedKmh > SPEED_LIMIT_KMH + OVER_SPEED_GRACE);
       if (over) {
         setPillState(`Over speed (${Math.round(speedKmh)} km/h)`, "bad");
@@ -634,11 +708,9 @@
         navStatus.textContent = off ? "Off route" : "On route";
       }
 
-      // auto reroute
       if (offRouteCount >= OFF_ROUTE_HITS_TO_REROUTE) autoRerouteFrom(me);
       if (rerouting) return;
 
-      // step mapping
       if (steps.length && routeDistanceM > 0) {
         const traveled = Math.max(0, routeDistanceM - rem);
         const sIdx = stepIndexFromTraveled(traveled);
@@ -649,7 +721,6 @@
         navIn.textContent = "In " + fmtDist(distToNext);
         navRoad.textContent = "Road: " + (s.name || "—");
 
-        // voice once near maneuver
         if (distToNext <= SPEAK_WITHIN_METERS && lastSpokenStep !== sIdx && (now - lastVoiceAt > VOICE_REPEAT_BLOCK_MS)) {
           speak(s.instruction);
           lastSpokenStep = sIdx;
@@ -662,12 +733,15 @@
     }, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
   }
 
-  // --- Buttons ---
+  // Buttons
   btnUseGPS.onclick = async () => {
     try {
-      startLL = await getCurrentPosition();
+      const pos = await getCurrentPosition();
+      startLL = [pos.coords.latitude, pos.coords.longitude];
+      gpsLL = [...startLL];
       startInput.value = DEFAULT_START_TEXT;
       startMarker = setMarker(startMarker, startLL, "Start", "#111827");
+      setUserLocation(startLL, pos.coords.accuracy);
       map.setView(startLL, 16, { animate: true });
       setPillState("Using current location", "ok");
     } catch {
@@ -678,7 +752,6 @@
   btnSwap.onclick = () => {
     const tmpLL = startLL; startLL = destLL; destLL = tmpLL;
     const tmpText = startInput.value; startInput.value = destInput.value; destInput.value = tmpText;
-
     if (!startInput.value.trim()) startInput.value = DEFAULT_START_TEXT;
 
     if (startLL) startMarker = setMarker(startMarker, startLL, "Start", "#111827");
@@ -710,10 +783,14 @@
 
     if (startMarker) map.removeLayer(startMarker), startMarker=null;
     if (destMarker) map.removeLayer(destMarker), destMarker=null;
-    if (userMarker) map.removeLayer(userMarker), userMarker=null;
+    if (userDot) map.removeLayer(userDot), userDot=null;
+    if (accCircle) map.removeLayer(accCircle), accCircle=null;
+
     if (routeLine) map.removeLayer(routeLine), routeLine=null;
     altLines.forEach(l => map.removeLayer(l));
     altLines = [];
+    if (routeDoneLine) map.removeLayer(routeDoneLine), routeDoneLine=null;
+    if (routeAheadLine) map.removeLayer(routeAheadLine), routeAheadLine=null;
 
     routeCoords = [];
     routeDistanceM = 0;
@@ -737,6 +814,8 @@
 
     showNavPanel(false);
     btnNav.disabled = true;
+
+    applyRotation(0);
   };
 
   btnRecenter.onclick = () => { followMode = true; setPillState("Recentered", "ok"); };
