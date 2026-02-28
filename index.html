@@ -1,4 +1,4 @@
- <!DOCTYPE html>
+<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8"/>
@@ -6,7 +6,6 @@
 <title>DriveNav Pro</title>
 
 <meta name="apple-mobile-web-app-capable" content="yes"/>
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <meta name="theme-color" content="#111827"/>
 
 <link rel="manifest" href="manifest.webmanifest">
@@ -16,264 +15,250 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
 <style>
+:root{--brand:#111827;--blue:#2563eb;--grey:#94a3b8}
 body{margin:0;font-family:-apple-system,system-ui;background:#f6f7fb}
-header{background:#111827;color:#fff;padding:14px;font-weight:900}
-#map{height:55vh}
-.controls{padding:12px}
-input{width:100%;padding:12px;border-radius:12px;border:1px solid #ddd;margin-bottom:8px}
-button{padding:12px;border:none;border-radius:12px;background:#111827;color:#fff;font-weight:800;margin-right:6px;margin-top:4px}
-.status{margin-top:10px;font-weight:700}
+header{background:var(--brand);color:#fff;padding:14px;font-weight:900}
+.sheet{padding:12px}
+input{width:100%;padding:12px;border-radius:12px;border:1px solid #ddd;margin-bottom:6px}
+button{padding:10px 14px;border:none;border-radius:12px;background:var(--brand);color:#fff;font-weight:800;margin:4px}
+button.ghost{background:#eef2ff;color:#111827}
+button.secondary{background:#334155}
+.pill{display:inline-block;padding:6px 10px;border-radius:999px;font-weight:800;margin-right:6px;background:#f1f5f9}
+.pill.ok{background:#ecfeff;color:#155e75}
+.pill.bad{background:#fff1f2;color:#9f1239}
+#map{height:55vh;margin-top:8px}
 .turn{background:#0b1220;color:#fff;padding:12px;border-radius:14px;margin-top:10px;display:none}
-.turn h3{margin:0 0 6px 0;font-size:14px}
-.turn p{margin:0;font-size:16px;font-weight:900}
+.suggest{background:#fff;border:1px solid #ddd;border-radius:12px;position:absolute;z-index:999;width:100%;display:none}
+.sItem{padding:8px;border-bottom:1px solid #eee;cursor:pointer}
+.sItem:last-child{border-bottom:none}
 </style>
 </head>
 <body>
 
 <header>DriveNav Pro</header>
 
-<div class="controls">
-<input id="destination" placeholder="Enter destination"/>
-<button id="routeBtn">Show Route</button>
-<button id="navBtn" disabled>Start Navigation</button>
-<button id="clearBtn">Clear</button>
+<div class="sheet">
 
-<div class="status">
-<span id="distance">Distance: —</span> |
-<span id="eta">ETA: —</span> |
-<span id="state">Ready</span>
+<div style="position:relative">
+<input id="startInput" placeholder="Start (leave empty for GPS)">
+<div id="startSug" class="suggest"></div>
+</div>
+
+<div style="position:relative">
+<input id="destInput" placeholder="Destination">
+<div id="destSug" class="suggest"></div>
+</div>
+
+<div>
+<button class="ghost" id="btnUseGPS">Use GPS</button>
+<button class="ghost" id="btnSwap">Swap</button>
+<button id="btnRoute">Show Route</button>
+<button class="secondary" id="btnNav" disabled>Start Nav</button>
+<button class="ghost" id="btnClear">Clear</button>
+</div>
+
+<div style="margin-top:8px">
+<span class="pill" id="pillDist">Distance: —</span>
+<span class="pill" id="pillEta">ETA: —</span>
+<span class="pill" id="pillSpeed">Speed: —</span>
+<span class="pill ok" id="pillState">Ready</span>
 </div>
 
 <div class="turn" id="turnPanel">
-<h3>Next</h3>
-<p id="turnText">—</p>
+<div id="turnText">—</div>
 </div>
+
 </div>
 
 <div id="map"></div>
 
 <script>
+const OSRM="https://router.project-osrm.org/route/v1/driving/";
+const NOMINATIM="https://nominatim.openstreetmap.org/search?format=json&limit=6&q=";
+
+const OFF_ROUTE_METERS=60;
+const SPEAK_WITHIN_METERS=120;
+const SPEED_LIMIT=60;
+
 const map=L.map("map").setView([19.076,72.8777],12);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19}).addTo(map);
 
-const OSRM="https://router.project-osrm.org/route/v1/driving/";
-const NOMINATIM="https://nominatim.openstreetmap.org/search?format=json&limit=1&q=";
+let startLL=null,destLL=null;
+let startMarker=null,destMarker=null,userMarker=null;
+let routeLine=null,altLines=[];
+let routeCoords=[],routeDistance=0,routeDuration=0;
+let steps=[];
+let watchId=null,lastSpoken=-1;
 
-let routeLine=null,userMarker=null,startLL=null,destLL=null;
-let routeCoords=[],routeDuration=0,routeDistance=0;
-let watchId=null,steps=[],lastSpokenStep=-1;
-let rerouting=false,lastReroute=0,offCount=0;
-
-let lastGPS=null;
-let overSpeedSpokenAt=0;
-const SPEED_LIMIT_KMH=60;
-
-const OFF_METERS=60;
-const COOLDOWN=20000;
-const SPEAK_WITHIN_METERS=120;
-const CACHE_KEY="drivenav_last_route_v2";
+const startInput=document.getElementById("startInput");
+const destInput=document.getElementById("destInput");
+const startSug=document.getElementById("startSug");
+const destSug=document.getElementById("destSug");
 
 function speak(text){
-  if(!window.speechSynthesis) return;
-  const u=new SpeechSynthesisUtterance(text);
-  u.rate=1;
-  speechSynthesis.speak(u);
+ if(!window.speechSynthesis) return;
+ speechSynthesis.cancel();
+ speechSynthesis.speak(new SpeechSynthesisUtterance(text));
 }
 
 function hav(a,b){
-  const R=6371000;
-  const toRad=x=>x*Math.PI/180;
-  const dLat=toRad(b[0]-a[0]);
-  const dLon=toRad(b[1]-a[1]);
-  const lat1=toRad(a[0]);
-  const lat2=toRad(b[0]);
-  const s=Math.sin(dLat/2)**2+Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
-  return 2*R*Math.asin(Math.sqrt(s));
+ const R=6371000;
+ const toRad=x=>x*Math.PI/180;
+ const dLat=toRad(b[0]-a[0]);
+ const dLon=toRad(b[1]-a[1]);
+ const lat1=toRad(a[0]);
+ const lat2=toRad(b[0]);
+ const s=Math.sin(dLat/2)**2+Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+ return 2*R*Math.asin(Math.sqrt(s));
 }
 
-function project(p,a,b){
-  const toXY=([lat,lon])=>[lon,lat];
-  const P=toXY(p),A=toXY(a),B=toXY(b);
-  const AB=[B[0]-A[0],B[1]-A[1]];
-  const AP=[P[0]-A[0],P[1]-A[1]];
-  const ab2=AB[0]*AB[0]+AB[1]*AB[1];
-  const t=ab2===0?0:(AP[0]*AB[0]+AP[1]*AB[1])/ab2;
-  const tc=Math.max(0,Math.min(1,t));
-  const proj=[A[0]+AB[0]*tc,A[1]+AB[1]*tc];
-  return [proj[1],proj[0]];
+function setMarker(old,ll,color,label){
+ if(old) map.removeLayer(old);
+ if(!ll) return null;
+ return L.circleMarker(ll,{radius:7,color}).addTo(map).bindPopup(label||"");
 }
 
-function snap(point){
-  let best=routeCoords[0],bestDist=Infinity,index=0;
-  for(let i=0;i<routeCoords.length-1;i++){
-    const s=project(point,routeCoords[i],routeCoords[i+1]);
-    const d=hav(point,s);
-    if(d<bestDist){bestDist=d;best=s;index=i;}
-  }
-  return {snapped:best,distance:bestDist,index};
+async function geocode(q){
+ const r=await fetch(NOMINATIM+encodeURIComponent(q));
+ return await r.json();
 }
 
-function naturalInstruction(step){
-  const m=step.maneuver||{};
-  const road=step.name||"";
-  const onto=road?` onto ${road}`:"";
-  if(m.type==="arrive") return "You have arrived at your destination";
-  if(m.type==="turn") return `Turn ${m.modifier||""}${onto}`.trim();
-  if(m.type==="merge") return `Merge${onto}`;
-  if(m.type==="continue") return `Continue${onto}`;
-  if(m.type==="fork") return `Keep ${m.modifier||""}${onto}`.trim();
-  if(m.type==="roundabout") return "Enter the roundabout";
-  return `${m.type||"Proceed"}${onto}`;
+function showSug(el,data,cb){
+ el.innerHTML="";
+ if(!data.length){el.style.display="none";return;}
+ data.forEach(d=>{
+   const div=document.createElement("div");
+   div.className="sItem";
+   div.innerText=d.display_name;
+   div.onclick=()=>{cb(d);el.style.display="none";}
+   el.appendChild(div);
+ });
+ el.style.display="block";
 }
 
-function buildSteps(json){
-  const raw=json.routes[0].legs[0].steps||[];
-  steps=raw.map(s=>({
-    instruction:naturalInstruction(s),
-    distance:s.distance,
-    maneuver:s.maneuver,
-    name:s.name
-  }));
-}
-
-function saveRoute(){
-  localStorage.setItem(CACHE_KEY,JSON.stringify({
-    routeCoords,routeDuration,routeDistance,steps,destLL
-  }));
-}
-
-function loadRoute(){
-  const raw=localStorage.getItem(CACHE_KEY);
-  if(!raw) return;
-  const data=JSON.parse(raw);
-  routeCoords=data.routeCoords||[];
-  routeDuration=data.routeDuration||0;
-  routeDistance=data.routeDistance||0;
-  steps=data.steps||[];
-  destLL=data.destLL||null;
-
-  if(routeCoords.length){
-    routeLine=L.polyline(routeCoords,{color:"#2563eb",weight:6}).addTo(map);
-    map.fitBounds(routeLine.getBounds());
-    document.getElementById("navBtn").disabled=false;
-  }
-}
-
-async function route(){
-  if(!destLL) return alert("Enter destination");
-
-  const pos=await new Promise((res,rej)=>{
-    navigator.geolocation.getCurrentPosition(p=>res([p.coords.latitude,p.coords.longitude]),rej,{enableHighAccuracy:true});
-  });
-  startLL=pos;
-
-  const url=OSRM+`${startLL[1]},${startLL[0]};${destLL[1]},${destLL[0]}?overview=full&geometries=geojson&steps=true`;
-  const r=await fetch(url).then(r=>r.json());
-  const data=r.routes[0];
-
-  routeDuration=data.duration;
-  routeDistance=data.distance;
-  routeCoords=data.geometry.coordinates.map(c=>[c[1],c[0]]);
-
-  if(routeLine) map.removeLayer(routeLine);
-  routeLine=L.polyline(routeCoords,{color:"#2563eb",weight:6}).addTo(map);
-  map.fitBounds(routeLine.getBounds());
-
-  buildSteps(r);
-  saveRoute();
-
-  document.getElementById("distance").innerText="Distance: "+(routeDistance/1000).toFixed(1)+" km";
-  document.getElementById("eta").innerText="ETA: "+Math.round(routeDuration/60)+" min";
-  document.getElementById("navBtn").disabled=false;
-}
-
-function startNav(){
-  watchId=navigator.geolocation.watchPosition(pos=>{
-    const me=[pos.coords.latitude,pos.coords.longitude];
-    const now=Date.now();
-
-    const {snapped,distance,index}=snap(me);
-
-    if(userMarker) map.removeLayer(userMarker);
-    userMarker=L.circleMarker(snapped,{radius:8,color:"#2563eb"}).addTo(map);
-    map.panTo(snapped);
-
-    const off=distance>OFF_METERS;
-    if(off) offCount++; else offCount=0;
-
-    if(offCount>=3 && now-lastReroute>COOLDOWN){
-      lastReroute=now;
-      route();
-    }
-
-    let speed=pos.coords.speed;
-    if(!Number.isFinite(speed) && lastGPS){
-      const dt=(now-lastGPS.t)/1000;
-      if(dt>0.5){
-        const d=hav(lastGPS.ll,me);
-        speed=d/dt;
-      }
-    }
-    lastGPS={ll:me,t:now};
-    const speedKmh=speed?speed*3.6:null;
-
-    if(speedKmh && speedKmh>SPEED_LIMIT_KMH+5){
-      document.getElementById("state").innerText="Over speed!";
-      if(now-overSpeedSpokenAt>30000){
-        speak("You are over speed limit");
-        overSpeedSpokenAt=now;
-      }
-    }else{
-      document.getElementById("state").innerText=off?"Off route":"On route";
-    }
-
-    const rem=routeDistance*(1-index/routeCoords.length);
-    document.getElementById("distance").innerText="Distance: "+(rem/1000).toFixed(1)+" km";
-    const eta=rem/(routeDistance/routeDuration);
-    document.getElementById("eta").innerText="ETA: "+Math.round(eta/60)+" min";
-
-    let traveled=routeDistance-rem;
-    let acc=0;
-    for(let i=0;i<steps.length;i++){
-      acc+=steps[i].distance;
-      if(traveled<=acc){
-        document.getElementById("turnPanel").style.display="block";
-        document.getElementById("turnText").innerText=steps[i].instruction;
-        const distToTurn=acc-traveled;
-        if(distToTurn<=SPEAK_WITHIN_METERS && lastSpokenStep!==i){
-          speak(steps[i].instruction);
-          lastSpokenStep=i;
-        }
-        break;
-      }
-    }
-
-  },err=>alert(err.message),{enableHighAccuracy:true});
-}
-
-document.getElementById("routeBtn").onclick=async()=>{
-  const q=document.getElementById("destination").value;
-  const res=await fetch(NOMINATIM+encodeURIComponent(q)).then(r=>r.json());
-  if(!res.length) return alert("Not found");
-  destLL=[Number(res[0].lat),Number(res[0].lon)];
-  await route();
+startInput.oninput=async()=>{
+ if(startInput.value.length<3)return;
+ const data=await geocode(startInput.value);
+ showSug(startSug,data,d=>{
+   startLL=[+d.lat,+d.lon];
+   startMarker=setMarker(startMarker,startLL,"#111827","Start");
+ });
 };
 
-document.getElementById("navBtn").onclick=startNav;
-
-document.getElementById("clearBtn").onclick=()=>{
-  if(watchId) navigator.geolocation.clearWatch(watchId);
-  map.eachLayer(l=>{if(l instanceof L.Polyline||l instanceof L.CircleMarker) map.removeLayer(l);});
-  routeCoords=[]; steps=[];
-  localStorage.removeItem(CACHE_KEY);
-  document.getElementById("navBtn").disabled=true;
-  document.getElementById("turnPanel").style.display="none";
-  document.getElementById("distance").innerText="Distance: —";
-  document.getElementById("eta").innerText="ETA: —";
-  document.getElementById("state").innerText="Ready";
+destInput.oninput=async()=>{
+ if(destInput.value.length<3)return;
+ const data=await geocode(destInput.value);
+ showSug(destSug,data,d=>{
+   destLL=[+d.lat,+d.lon];
+   destMarker=setMarker(destMarker,destLL,"#e11d48","Destination");
+ });
 };
 
-loadRoute();
+document.getElementById("btnSwap").onclick=()=>{
+ [startLL,destLL]=[destLL,startLL];
+ [startInput.value,destInput.value]=[destInput.value,startInput.value];
+ startMarker=setMarker(startMarker,startLL,"#111827","Start");
+ destMarker=setMarker(destMarker,destLL,"#e11d48","Destination");
+};
+
+document.getElementById("btnUseGPS").onclick=async()=>{
+ const pos=await new Promise((res,rej)=>{
+   navigator.geolocation.getCurrentPosition(p=>res([p.coords.latitude,p.coords.longitude]),rej);
+ });
+ startLL=pos;
+ startMarker=setMarker(startMarker,startLL,"#111827","Start");
+ map.setView(startLL,16);
+};
+
+document.getElementById("btnRoute").onclick=async()=>{
+ if(!destLL)return alert("Pick destination");
+ if(!startLL){
+   const pos=await new Promise((res,rej)=>{
+     navigator.geolocation.getCurrentPosition(p=>res([p.coords.latitude,p.coords.longitude]),rej);
+   });
+   startLL=pos;
+ }
+ startMarker=setMarker(startMarker,startLL,"#111827","Start");
+
+ const coords=`${startLL[1]},${startLL[0]};${destLL[1]},${destLL[0]}`;
+ const url=`${OSRM}${coords}?overview=full&geometries=geojson&steps=true&alternatives=true`;
+ const r=await fetch(url).then(r=>r.json());
+
+ if(routeLine) map.removeLayer(routeLine);
+ altLines.forEach(l=>map.removeLayer(l));
+ altLines=[];
+
+ const routes=r.routes;
+ routes.forEach((rt,i)=>{
+   const coords=rt.geometry.coordinates.map(c=>[c[1],c[0]]);
+   const line=L.polyline(coords,{color:i===0?"#2563eb":"#94a3b8",weight:i===0?6:4}).addTo(map);
+   if(i===0){
+     routeCoords=coords;
+     routeDistance=rt.distance;
+     routeDuration=rt.duration;
+     steps=rt.legs[0].steps;
+     routeLine=line;
+   }else{
+     line.on("click",()=>{
+       routeCoords=coords;
+       routeDistance=rt.distance;
+       routeDuration=rt.duration;
+       steps=rt.legs[0].steps;
+       altLines.forEach(l=>map.removeLayer(l));
+       map.removeLayer(routeLine);
+       routeLine=L.polyline(coords,{color:"#2563eb",weight:6}).addTo(map);
+     });
+     altLines.push(line);
+   }
+ });
+
+ map.fitBounds(routeLine.getBounds());
+ document.getElementById("pillDist").innerText="Distance: "+(routeDistance/1000).toFixed(1)+" km";
+ document.getElementById("pillEta").innerText="ETA: "+Math.round(routeDuration/60)+" min";
+ document.getElementById("btnNav").disabled=false;
+};
+
+document.getElementById("btnNav").onclick=()=>{
+ if(watchId){navigator.geolocation.clearWatch(watchId);watchId=null;return;}
+ watchId=navigator.geolocation.watchPosition(pos=>{
+   const me=[pos.coords.latitude,pos.coords.longitude];
+   userMarker=setMarker(userMarker,me,"#2563eb","You");
+   map.panTo(me);
+
+   const speed=pos.coords.speed?pos.coords.speed*3.6:null;
+   document.getElementById("pillSpeed").innerText="Speed: "+(speed?Math.round(speed)+" km/h":"—");
+
+   if(speed && speed>SPEED_LIMIT)
+     document.getElementById("pillState").innerText="Over speed!";
+   else
+     document.getElementById("pillState").innerText="On route";
+
+   let traveled=0,acc=0;
+   for(let i=0;i<steps.length;i++){
+     acc+=steps[i].distance;
+     if(traveled<=acc){
+       document.getElementById("turnPanel").style.display="block";
+       document.getElementById("turnText").innerText=steps[i].maneuver.type+" "+(steps[i].name||"");
+       if(lastSpoken!==i){speak(document.getElementById("turnText").innerText);lastSpoken=i;}
+       break;
+     }
+   }
+
+ },err=>alert(err.message),{enableHighAccuracy:true});
+};
+
+document.getElementById("btnClear").onclick=()=>{
+ if(watchId)navigator.geolocation.clearWatch(watchId);
+ map.eachLayer(l=>{if(l instanceof L.Polyline||l instanceof L.CircleMarker) map.removeLayer(l)});
+ startLL=null;destLL=null;routeCoords=[];steps=[];
+ document.getElementById("btnNav").disabled=true;
+ document.getElementById("turnPanel").style.display="none";
+ document.getElementById("pillDist").innerText="Distance: —";
+ document.getElementById("pillEta").innerText="ETA: —";
+ document.getElementById("pillSpeed").innerText="Speed: —";
+ document.getElementById("pillState").innerText="Ready";
+};
 </script>
+
 </body>
 </html>
