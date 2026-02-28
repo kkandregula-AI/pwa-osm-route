@@ -81,7 +81,7 @@
 <body>
 <header>
   DriveNav
-  <div class="sub">OSM + OSRM • Autocomplete • Turn-by-turn</div>
+  <div class="sub">OSM + OSRM • Autocomplete • Turn-by-turn • Auto reroute</div>
 </header>
 
 <div class="sheet">
@@ -116,7 +116,7 @@
     </div>
   </div>
 
-  <!-- ✅ Turn-by-turn panel -->
+  <!-- Turn-by-turn panel -->
   <div class="turnCard" id="turnCard">
     <div class="turnTop">
       <div>
@@ -197,6 +197,15 @@
 
   let watchId = null;
   let upcomingOpen = false;
+
+  // Auto reroute state
+  let rerouting = false;
+  let lastRerouteAt = 0;
+  let offRouteCount = 0;
+
+  const OFF_ROUTE_METERS = 60;          // threshold
+  const OFF_ROUTE_HITS_TO_REROUTE = 3;  // consecutive hits required
+  const REROUTE_COOLDOWN_MS = 20000;    // 20s cooldown
 
   function setPillState(text, kind="ok") {
     pillState.textContent = text;
@@ -341,30 +350,28 @@
     if (!document.getElementById("destField").contains(e.target))  destSug.style.display = "none";
   });
 
-  // ----- Turn-by-turn helpers -----
+  // Turn-by-turn helpers
   function makeInstruction(step){
     const m = step.maneuver || {};
-    const type = (m.type || "").replace(/_/g, " ");
-    const mod  = (m.modifier || "").replace(/_/g, " ");
     const name = step.name || "";
 
-    // Simple mapping (MVP but feels good)
     if (m.type === "depart") return "Head out";
     if (m.type === "arrive") return "Arrive at destination";
-    if (m.type === "roundabout") return "Enter roundabout" + (step.exit ? `, take exit ${step.exit}` : "");
+    if (m.type === "roundabout") return "Enter roundabout" + (m.exit ? `, take exit ${m.exit}` : "");
     if (m.type === "merge") return "Merge" + (name ? ` onto ${name}` : "");
     if (m.type === "on ramp") return "Take the ramp" + (name ? ` onto ${name}` : "");
     if (m.type === "off ramp") return "Take the exit" + (name ? ` to ${name}` : "");
-    if (m.type === "fork") return "Keep" + (mod ? ` ${mod}` : "");
-    if (m.type === "end of road") return "At end of road, turn" + (mod ? ` ${mod}` : "");
+    if (m.type === "fork") return "Keep" + (m.modifier ? ` ${m.modifier}` : "");
+    if (m.type === "end of road") return "At end of road, turn" + (m.modifier ? ` ${m.modifier}` : "");
     if (m.type === "continue") return "Continue" + (name ? ` on ${name}` : "");
-    if (m.type === "turn") return "Turn" + (mod ? ` ${mod}` : "") + (name ? ` onto ${name}` : "");
+    if (m.type === "turn") return "Turn" + (m.modifier ? ` ${m.modifier}` : "") + (name ? ` onto ${name}` : "");
     if (m.type === "new name") return "Continue" + (name ? ` on ${name}` : "");
-    if (m.type === "rotary") return "Enter rotary" + (step.exit ? `, take exit ${step.exit}` : "");
+    if (m.type === "rotary") return "Enter rotary" + (m.exit ? `, take exit ${m.exit}` : "");
     if (m.type === "straight") return "Go straight" + (name ? ` on ${name}` : "");
 
-    // fallback
-    return (type ? (type[0].toUpperCase()+type.slice(1)) : "Proceed") + (mod ? ` (${mod})` : "") + (name ? ` on ${name}` : "");
+    const t = (m.type || "proceed").replace(/_/g, " ");
+    const mod = (m.modifier || "").replace(/_/g, " ");
+    return (t[0].toUpperCase()+t.slice(1)) + (mod ? ` (${mod})` : "") + (name ? ` on ${name}` : "");
   }
 
   function buildSteps(osrmJson){
@@ -378,11 +385,9 @@
         duration: s.duration,
         name: s.name || "",
         maneuver: s.maneuver || {},
-        exit: s.maneuver?.exit,
         instruction: makeInstruction(s),
       }));
 
-    // cumulative distance (for mapping traveled distance -> step index)
     const cum = [];
     let acc = 0;
     for (const s of cleaned) {
@@ -394,7 +399,6 @@
   }
 
   function stepIndexFromTraveled(traveledM){
-    // first step where cumulative >= traveled
     for (let i=0;i<cumStepDist.length;i++){
       if (traveledM <= cumStepDist[i]) return i;
     }
@@ -403,9 +407,8 @@
 
   function stepDistanceRemaining(traveledM, stepIdx){
     const prevCum = stepIdx === 0 ? 0 : cumStepDist[stepIdx - 1];
-    const within = traveledM - prevCum; // meters already within this step
-    const rem = Math.max(0, steps[stepIdx].distance - within);
-    return rem;
+    const within = traveledM - prevCum;
+    return Math.max(0, steps[stepIdx].distance - within);
   }
 
   function renderUpcoming(stepIdx){
@@ -422,9 +425,7 @@
     });
   }
 
-  function showTurnPanel(show){
-    turnCard.style.display = show ? "block" : "none";
-  }
+  function showTurnPanel(show){ turnCard.style.display = show ? "block" : "none"; }
 
   stepsToggle.onclick = () => {
     upcomingOpen = !upcomingOpen;
@@ -432,7 +433,61 @@
     stepsChevron.textContent = upcomingOpen ? "▴" : "▾";
   };
 
-  // ----- Routing -----
+  // Auto reroute helper
+  async function autoRerouteFrom(currentLL){
+    if (!destLL) return;
+
+    const now = Date.now();
+    if (rerouting) return;
+    if (now - lastRerouteAt < REROUTE_COOLDOWN_MS) return;
+
+    rerouting = true;
+    lastRerouteAt = now;
+
+    try {
+      setPillState("Rerouting…", "bad");
+
+      startLL = currentLL;
+      startMarker = setMarker(startMarker, startLL, "Start", "#111827");
+
+      const coords = `${startLL[1]},${startLL[0]};${destLL[1]},${destLL[0]}`;
+      const url = `${OSRM}${coords}?overview=full&geometries=geojson&steps=true`;
+
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Reroute HTTP " + res.status);
+
+      const json = await res.json();
+      if (!json.routes || !json.routes.length) throw new Error("No reroute found.");
+
+      const r = json.routes[0];
+      routeDurationSec = r.duration;
+      routeDistanceM = r.distance;
+
+      routeCoords = r.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+
+      if (routeLine) map.removeLayer(routeLine);
+      routeLine = L.polyline(routeCoords, { weight: 6, color: "#2563eb" }).addTo(map);
+
+      map.fitBounds(routeLine.getBounds(), { padding: [24, 24] });
+
+      pillDist.textContent = "Distance: " + fmtDist(routeDistanceM);
+      pillEta.textContent  = "ETA: " + fmtETA(routeDurationSec);
+
+      buildSteps(json);
+      showTurnPanel(true);
+
+      offRouteCount = 0;
+      setPillState("On route", "ok");
+
+    } catch (e) {
+      console.error(e);
+      setPillState("Reroute failed", "bad");
+    } finally {
+      rerouting = false;
+    }
+  }
+
+  // Routing
   async function fetchRoute() {
     if (!destLL) throw new Error("Pick a destination from suggestions.");
     if (!startLL) startLL = await getCurrentPosition();
@@ -464,11 +519,9 @@
     setPillState("Route ready");
     btnNav.disabled = false;
 
-    // ✅ Build turn-by-turn steps
     buildSteps(json);
     showTurnPanel(true);
 
-    // Default panel content (first step)
     if (steps.length) {
       turnMain.textContent = steps[0].instruction;
       turnDist.textContent = "In " + fmtDist(steps[0].distance);
@@ -504,21 +557,32 @@
       map.setView(me, Math.max(map.getZoom(), 16), { animate: true });
 
       const { index, distance } = nearestIndex(me, routeCoords);
-      const off = distance > 60;
+      const off = distance > OFF_ROUTE_METERS;
+
+      if (off) offRouteCount += 1;
+      else offRouteCount = 0;
 
       const rem = remainingDistance(routeCoords, index);
       pillDist.textContent = "Distance: " + fmtDist(rem);
 
       const etaSec = avgSpeedMps > 0 ? rem / avgSpeedMps : null;
       pillEta.textContent = "ETA: " + (etaSec ? fmtETA(etaSec) : "—");
+
       setPillState(off ? "Off route" : "On route", off ? "bad" : "ok");
 
-      // ✅ Turn-by-turn mapping (travelled distance -> step index)
+      // Auto reroute trigger
+      if (offRouteCount >= OFF_ROUTE_HITS_TO_REROUTE) {
+        autoRerouteFrom(me);
+      }
+
+      // Avoid flicker during reroute
+      if (rerouting) return;
+
+      // Turn-by-turn mapping
       if (steps.length && routeDistanceM > 0) {
         const traveled = Math.max(0, routeDistanceM - rem);
         const sIdx = stepIndexFromTraveled(traveled);
         const s = steps[sIdx];
-
         const distToNext = stepDistanceRemaining(traveled, sIdx);
 
         turnMain.textContent = s.instruction;
@@ -577,6 +641,10 @@
     cumStepDist = [];
     stepsList.innerHTML = "";
     showTurnPanel(false);
+
+    rerouting = false;
+    lastRerouteAt = 0;
+    offRouteCount = 0;
 
     pillDist.textContent = "Distance: —";
     pillEta.textContent  = "ETA: —";
