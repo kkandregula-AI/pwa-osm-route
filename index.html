@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
 <title>DriveNav</title>
 
-<!-- iOS PWA Support -->
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <meta name="apple-mobile-web-app-title" content="DriveNav"/>
@@ -18,174 +17,475 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
 <style>
-body {
-  margin:0;
-  font-family:-apple-system, system-ui;
-  background:#f9fafb;
-  padding-bottom:env(safe-area-inset-bottom);
-}
-header {
-  background:#111827;
-  color:white;
-  padding:16px;
-  font-weight:800;
-}
-.controls {
-  padding:12px;
-  display:flex;
-  gap:10px;
-  flex-direction:column;
-}
-input {
-  padding:14px;
-  border-radius:14px;
-  border:1px solid #ddd;
-  font-size:16px;
-}
-button {
-  padding:14px;
-  border-radius:14px;
-  border:none;
-  font-weight:800;
-  font-size:15px;
-  background:#111827;
-  color:white;
-}
-button.secondary { background:#374151; }
-#map { height:55vh; }
-.navPanel {
-  padding:14px;
-  background:white;
-  border-top:1px solid #eee;
-  display:flex;
-  justify-content:space-between;
-  font-size:14px;
-}
-.badge {
-  background:#f3f4f6;
-  padding:6px 12px;
-  border-radius:999px;
-}
+  :root{
+    --bg:#f6f7fb;
+    --card:#ffffff;
+    --ink:#0f172a;
+    --muted:#64748b;
+    --brand:#111827;
+    --line:#e5e7eb;
+    --blue:#2563eb;
+    --red:#e11d48;
+  }
+  body{
+    margin:0;
+    font-family:-apple-system, system-ui, Segoe UI, Roboto, Arial;
+    background:var(--bg);
+    color:var(--ink);
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+  header{
+    background:var(--brand);
+    color:#fff;
+    padding:14px 14px 12px;
+    font-weight:900;
+    letter-spacing:.2px;
+  }
+  header .sub{ font-weight:600; font-size:12px; opacity:.75; margin-top:4px; }
+  .sheet{
+    padding:12px;
+    display:grid;
+    gap:10px;
+  }
+  .card{
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:16px;
+    padding:12px;
+    box-shadow:0 6px 20px rgba(15,23,42,.06);
+  }
+  .row{ display:flex; gap:8px; flex-wrap:wrap; }
+  .field{
+    display:grid;
+    gap:6px;
+    flex:1;
+    min-width:220px;
+    position:relative;
+  }
+  label{ font-size:12px; color:var(--muted); font-weight:700; }
+  input{
+    width:100%;
+    box-sizing:border-box;
+    padding:12px 12px;
+    border-radius:14px;
+    border:1px solid var(--line);
+    font-size:15px;
+    outline:none;
+    background:#fff;
+  }
+  input:focus{ border-color:#cbd5e1; box-shadow:0 0 0 4px rgba(37,99,235,.08); }
+  .hint{ font-size:12px; color:var(--muted); margin-top:2px; }
+  .btn{
+    padding:12px 14px;
+    border:none;
+    border-radius:14px;
+    font-weight:900;
+    background:var(--brand);
+    color:#fff;
+    cursor:pointer;
+    flex:1;
+    min-width:160px;
+  }
+  .btn.secondary{ background:#334155; }
+  .btn.ghost{ background:#eef2ff; color:var(--brand); }
+  .btn:disabled{ opacity:.45; cursor:not-allowed; }
+  #map{ height:55vh; border-top:1px solid var(--line); }
+  .pillRow{ display:flex; gap:8px; flex-wrap:wrap; }
+  .pill{
+    background:#f1f5f9;
+    padding:7px 10px;
+    border-radius:999px;
+    font-size:13px;
+    font-weight:800;
+    color:#0f172a;
+  }
+  .pill.ok{ background:#ecfeff; color:#155e75; }
+  .pill.bad{ background:#fff1f2; color:#9f1239; }
+
+  /* Suggestions dropdown */
+  .suggest{
+    position:absolute;
+    top:74px;
+    left:0;
+    right:0;
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius:14px;
+    overflow:hidden;
+    box-shadow:0 18px 30px rgba(15,23,42,.12);
+    z-index:999;
+  }
+  .sItem{
+    padding:10px 12px;
+    border-bottom:1px solid #f1f5f9;
+    font-size:13px;
+    cursor:pointer;
+  }
+  .sItem:last-child{ border-bottom:none; }
+  .sItem:hover{ background:#f8fafc; }
+  .sTitle{ font-weight:800; }
+  .sSub{ color:var(--muted); font-size:12px; margin-top:2px; }
 </style>
 </head>
+
 <body>
+<header>
+  DriveNav
+  <div class="sub">OSM + OSRM • Clean routing + real-time follow</div>
+</header>
 
-<header>DriveNav • Real-Time Navigation</header>
+<div class="sheet">
+  <div class="card">
+    <div class="row">
+      <div class="field" id="startField">
+        <label>Start</label>
+        <input id="startInput" placeholder="Current location (default)" autocomplete="off"/>
+        <div class="hint">Leave empty to use GPS.</div>
+        <div id="startSug" class="suggest" style="display:none"></div>
+      </div>
 
-<div class="controls">
-  <input id="destination" placeholder="Enter destination address"/>
-  <button id="routeBtn">Show Route</button>
-  <button id="navBtn" class="secondary">Start Navigation</button>
+      <div class="field" id="destField">
+        <label>Destination</label>
+        <input id="destInput" placeholder="Type destination…" autocomplete="off"/>
+        <div class="hint" id="destHint">Type 3+ chars to see suggestions.</div>
+        <div id="destSug" class="suggest" style="display:none"></div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:10px">
+      <button class="btn ghost" id="btnUseGPS">Use GPS Start</button>
+      <button class="btn" id="btnRoute">Show Route</button>
+      <button class="btn secondary" id="btnNav" disabled>Start Navigation</button>
+      <button class="btn ghost" id="btnClear">Clear</button>
+    </div>
+
+    <div class="pillRow" style="margin-top:10px">
+      <div class="pill" id="pillDist">Distance: —</div>
+      <div class="pill" id="pillEta">ETA: —</div>
+      <div class="pill ok" id="pillState">Ready</div>
+    </div>
+  </div>
 </div>
 
 <div id="map"></div>
 
-<div class="navPanel" id="navPanel" style="display:none;">
-  <div class="badge" id="distance">Distance: --</div>
-  <div class="badge" id="eta">ETA: --</div>
-  <div class="badge" id="status">On Route</div>
-</div>
-
 <script>
-const map = L.map("map",{zoomControl:true}).setView([19.076,72.8777],12);
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{
-  maxZoom:19,
-  attribution:"© OpenStreetMap"
-}).addTo(map);
+  // Endpoints
+  const NOMINATIM = "https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&q=";
+  const OSRM = "https://router.project-osrm.org/route/v1/driving/";
 
-let routeLine=null;
-let userMarker=null;
-let routeCoords=[];
-let routeDuration=0;
-let watchId=null;
+  // UI
+  const startInput = document.getElementById("startInput");
+  const destInput  = document.getElementById("destInput");
+  const startSug   = document.getElementById("startSug");
+  const destSug    = document.getElementById("destSug");
+  const destHint   = document.getElementById("destHint");
 
-function haversine(a,b){
-  const R=6371000;
-  const toRad=x=>x*Math.PI/180;
-  const dLat=toRad(b[0]-a[0]);
-  const dLon=toRad(b[1]-a[1]);
-  const lat1=toRad(a[0]);
-  const lat2=toRad(b[0]);
-  const s=Math.sin(dLat/2)**2+Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
-  return 2*R*Math.asin(Math.sqrt(s));
-}
+  const btnUseGPS  = document.getElementById("btnUseGPS");
+  const btnRoute   = document.getElementById("btnRoute");
+  const btnNav     = document.getElementById("btnNav");
+  const btnClear   = document.getElementById("btnClear");
 
-function nearestIndex(point){
-  let best=0, bestDist=Infinity;
-  routeCoords.forEach((c,i)=>{
-    const d=haversine(point,c);
-    if(d<bestDist){bestDist=d;best=i;}
-  });
-  return {index:best,distance:bestDist};
-}
+  const pillDist   = document.getElementById("pillDist");
+  const pillEta    = document.getElementById("pillEta");
+  const pillState  = document.getElementById("pillState");
 
-async function geocode(q){
-  const res=await fetch("https://nominatim.openstreetmap.org/search?format=json&q="+encodeURIComponent(q));
-  return await res.json();
-}
+  // Map
+  const map = L.map("map", { zoomControl: true }).setView([19.076, 72.8777], 12);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "© OpenStreetMap contributors",
+  }).addTo(map);
 
-async function getCurrent(){
-  return new Promise((resolve,reject)=>{
-    navigator.geolocation.getCurrentPosition(
-      pos=>resolve([pos.coords.latitude,pos.coords.longitude]),
-      err=>reject(err),
-      {enableHighAccuracy:true,timeout:20000}
-    );
-  });
-}
+  // Markers and route
+  let startLL = null;     // [lat, lon]
+  let destLL  = null;
+  let startLabel = "";
+  let destLabel  = "";
 
-async function buildRoute(start,dest){
-  const url=`https://router.project-osrm.org/route/v1/driving/${start[1]},${start[0]};${dest[1]},${dest[0]}?overview=full&geometries=geojson`;
-  const res=await fetch(url);
-  const data=await res.json();
-  const r=data.routes[0];
-  routeDuration=r.duration;
-  routeCoords=r.geometry.coordinates.map(c=>[c[1],c[0]]);
-  if(routeLine) map.removeLayer(routeLine);
-  routeLine=L.polyline(routeCoords,{weight:5,color:"#2563eb"}).addTo(map);
-  map.fitBounds(routeLine.getBounds());
-}
+  let startMarker = null;
+  let destMarker  = null;
+  let userMarker  = null;
+  let routeLine   = null;
 
-document.getElementById("routeBtn").onclick=async()=>{
-  const destText=document.getElementById("destination").value;
-  if(!destText) return alert("Enter destination");
-  const start=await getCurrent();
-  const destData=await geocode(destText);
-  const dest=[Number(destData[0].lat),Number(destData[0].lon)];
-  await buildRoute(start,dest);
-  alert("Route Ready");
-};
+  let routeCoords = [];   // [[lat,lon],...]
+  let routeDurationSec = 0;
+  let watchId = null;
 
-document.getElementById("navBtn").onclick=()=>{
-  if(!routeCoords.length) return alert("Build route first");
-  if(watchId){
-    navigator.geolocation.clearWatch(watchId);
-    watchId=null;
-    document.getElementById("navBtn").innerText="Start Navigation";
-    document.getElementById("navPanel").style.display="none";
-    return;
+  function setPillState(text, kind="ok") {
+    pillState.textContent = text;
+    pillState.className = "pill " + (kind === "bad" ? "bad" : "ok");
   }
-  document.getElementById("navPanel").style.display="flex";
-  document.getElementById("navBtn").innerText="Stop Navigation";
 
-  watchId=navigator.geolocation.watchPosition(pos=>{
-    const me=[pos.coords.latitude,pos.coords.longitude];
-    if(userMarker) map.removeLayer(userMarker);
-    userMarker=L.circleMarker(me,{radius:8,color:"#2563eb"}).addTo(map);
-    map.setView(me,16);
+  function setMarker(existing, latlng, label, color) {
+    if (existing) map.removeLayer(existing);
+    if (!latlng) return null;
 
-    const {index,distance}=nearestIndex(me);
-    document.getElementById("status").innerText=distance>60?"Off Route":"On Route";
+    const icon = L.divIcon({
+      className: "m",
+      html: `<div style="width:14px;height:14px;border-radius:999px;background:${color};border:2px solid #fff;box-shadow:0 2px 10px rgba(0,0,0,.25)"></div>`,
+      iconSize: [14,14],
+      iconAnchor: [7,7]
+    });
 
-    let remaining=0;
-    for(let i=index;i<routeCoords.length-1;i++){
-      remaining+=haversine(routeCoords[i],routeCoords[i+1]);
+    const m = L.marker(latlng, { icon }).addTo(map);
+    if (label) m.bindPopup(label);
+    return m;
+  }
+
+  function haversineMeters(a, b) {
+    const R = 6371000;
+    const toRad = x => x * Math.PI / 180;
+    const dLat = toRad(b[0] - a[0]);
+    const dLon = toRad(b[1] - a[1]);
+    const lat1 = toRad(a[0]);
+    const lat2 = toRad(b[0]);
+    const s = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+    return 2 * R * Math.asin(Math.sqrt(s));
+  }
+
+  function nearestIndex(point, route) {
+    let bestI = 0, bestD = Infinity;
+    for (let i=0; i<route.length; i++) {
+      const d = haversineMeters(point, route[i]);
+      if (d < bestD) { bestD = d; bestI = i; }
     }
-    document.getElementById("distance").innerText="Distance: "+(remaining/1000).toFixed(1)+" km";
-    document.getElementById("eta").innerText="ETA: "+Math.round((remaining/(routeDuration||10))/60)+" min";
+    return { index: bestI, distance: bestD };
+  }
 
-  },err=>alert(err.message),{enableHighAccuracy:true});
-};
+  function remainingDistance(route, fromIndex) {
+    let sum = 0;
+    for (let i = fromIndex; i < route.length - 1; i++) {
+      sum += haversineMeters(route[i], route[i + 1]);
+    }
+    return sum;
+  }
+
+  async function geocode(q) {
+    const res = await fetch(NOMINATIM + encodeURIComponent(q), {
+      headers: { "Accept": "application/json" }
+    });
+    if (!res.ok) throw new Error("Geocode HTTP " + res.status);
+    return await res.json();
+  }
+
+  async function getCurrentPosition() {
+    return new Promise((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve([pos.coords.latitude, pos.coords.longitude]),
+        (err) => reject(err),
+        { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
+      );
+    });
+  }
+
+  function showSuggestions(el, items, onPick) {
+    el.innerHTML = "";
+    if (!items.length) { el.style.display = "none"; return; }
+    items.forEach(it => {
+      const div = document.createElement("div");
+      div.className = "sItem";
+      const title = (it.display_name || "").split(",").slice(0,2).join(", ");
+      div.innerHTML = `<div class="sTitle">${title}</div><div class="sSub">${it.display_name}</div>`;
+      div.onclick = () => { el.style.display = "none"; onPick(it); };
+      el.appendChild(div);
+    });
+    el.style.display = "block";
+  }
+
+  function debounce(fn, wait) {
+    let t = null;
+    return (...args) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn(...args), wait);
+    };
+  }
+
+  const searchStart = debounce(async () => {
+    const q = startInput.value.trim();
+    if (q.length < 3) return showSuggestions(startSug, [], ()=>{});
+    try {
+      const data = await geocode(q);
+      showSuggestions(startSug, data, (it) => {
+        startLL = [Number(it.lat), Number(it.lon)];
+        startLabel = it.display_name;
+        startInput.value = it.display_name;
+        startMarker = setMarker(startMarker, startLL, "Start", "#111827");
+        setPillState("Start set");
+      });
+    } catch { showSuggestions(startSug, [], ()=>{}); }
+  }, 300);
+
+  const searchDest = debounce(async () => {
+    const q = destInput.value.trim();
+    if (q.length < 3) {
+      destHint.textContent = "Type 3+ chars to see suggestions.";
+      return showSuggestions(destSug, [], ()=>{});
+    }
+    destHint.textContent = "Searching…";
+    try {
+      const data = await geocode(q);
+      destHint.textContent = data.length ? "Tap a suggestion." : "No results.";
+      showSuggestions(destSug, data, (it) => {
+        destLL = [Number(it.lat), Number(it.lon)];
+        destLabel = it.display_name;
+        destInput.value = it.display_name;
+        destMarker = setMarker(destMarker, destLL, "Destination", "#e11d48");
+        setPillState("Destination set");
+      });
+    } catch {
+      destHint.textContent = "Search failed.";
+      showSuggestions(destSug, [], ()=>{});
+    }
+  }, 300);
+
+  startInput.addEventListener("input", () => {
+    startLL = null; startLabel = "";
+    searchStart();
+  });
+
+  destInput.addEventListener("input", () => {
+    destLL = null; destLabel = "";
+    searchDest();
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!document.getElementById("startField").contains(e.target)) startSug.style.display = "none";
+    if (!document.getElementById("destField").contains(e.target))  destSug.style.display = "none";
+  });
+
+  async function fetchRoute() {
+    if (!destLL) throw new Error("Pick a destination from suggestions.");
+    if (!startLL) startLL = await getCurrentPosition();
+
+    const coords = `${startLL[1]},${startLL[0]};${destLL[1]},${destLL[0]}`;
+    const url = `${OSRM}${coords}?overview=full&geometries=geojson&steps=true`;
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("Route HTTP " + res.status);
+    const json = await res.json();
+    if (!json.routes || !json.routes.length) throw new Error("No route found.");
+
+    const r = json.routes[0];
+    routeDurationSec = r.duration;
+    routeCoords = r.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+
+    if (routeLine) map.removeLayer(routeLine);
+    routeLine = L.polyline(routeCoords, { weight: 6, color: "#2563eb" }).addTo(map);
+
+    // show start marker if GPS used
+    startMarker = setMarker(startMarker, startLL, "Start", "#111827");
+
+    map.fitBounds(routeLine.getBounds(), { padding: [24, 24] });
+
+    pillDist.textContent = "Distance: " + (r.distance/1000).toFixed(1) + " km";
+    pillEta.textContent  = "ETA: " + Math.max(1, Math.round(r.duration/60)) + " min";
+    setPillState("Route ready");
+    btnNav.disabled = false;
+  }
+
+  function stopNav() {
+    if (watchId) navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+    btnNav.textContent = "Start Navigation";
+    setPillState("Navigation stopped");
+  }
+
+  function startNav() {
+    if (!routeCoords.length) { alert("Create route first."); return; }
+
+    btnNav.textContent = "Stop Navigation";
+    setPillState("Navigating…");
+
+    // average speed from OSRM route
+    const totalDist = routeCoords.reduce((acc, c, i) => {
+      if (i === 0) return 0;
+      return acc + haversineMeters(routeCoords[i-1], c);
+    }, 0);
+    const avgSpeedMps = routeDurationSec ? (totalDist / routeDurationSec) : 10;
+
+    watchId = navigator.geolocation.watchPosition((pos) => {
+      const me = [pos.coords.latitude, pos.coords.longitude];
+
+      // blue dot marker
+      userMarker = setMarker(userMarker, me, "You", "#2563eb");
+
+      // follow camera
+      map.setView(me, Math.max(map.getZoom(), 16), { animate: true });
+
+      // off-route + remaining
+      const { index, distance } = nearestIndex(me, routeCoords);
+      const off = distance > 60;
+
+      const rem = remainingDistance(routeCoords, index);
+      pillDist.textContent = "Distance: " + (rem/1000).toFixed(1) + " km";
+
+      const etaSec = avgSpeedMps > 0 ? rem / avgSpeedMps : null;
+      pillEta.textContent = "ETA: " + (etaSec ? Math.max(1, Math.round(etaSec/60)) : "—") + " min";
+
+      setPillState(off ? "Off route" : "On route", off ? "bad" : "ok");
+    }, (err) => {
+      alert("GPS error: " + err.message);
+      stopNav();
+    }, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
+
+  }
+
+  btnUseGPS.onclick = async () => {
+    try {
+      startLL = await getCurrentPosition();
+      startLabel = "Current location";
+      startInput.value = "";
+      startMarker = setMarker(startMarker, startLL, "Start", "#111827");
+      map.setView(startLL, 16, { animate: true });
+      setPillState("Using GPS start");
+    } catch (e) {
+      alert("Location error. Make sure HTTPS and allow permission.");
+    }
+  };
+
+  btnRoute.onclick = async () => {
+    try {
+      if (watchId) stopNav();
+      btnNav.disabled = true;
+      setPillState("Routing…");
+      await fetchRoute();
+    } catch (e) {
+      setPillState("Route failed", "bad");
+      alert(e.message || String(e));
+    }
+  };
+
+  btnNav.onclick = () => {
+    if (watchId) stopNav();
+    else startNav();
+  };
+
+  btnClear.onclick = () => {
+    if (watchId) stopNav();
+
+    startLL = null; destLL = null;
+    startLabel = ""; destLabel = "";
+    startInput.value = ""; destInput.value = "";
+
+    if (startMarker) map.removeLayer(startMarker), startMarker=null;
+    if (destMarker) map.removeLayer(destMarker), destMarker=null;
+    if (userMarker) map.removeLayer(userMarker), userMarker=null;
+    if (routeLine) map.removeLayer(routeLine), routeLine=null;
+
+    routeCoords = [];
+    routeDurationSec = 0;
+
+    pillDist.textContent = "Distance: —";
+    pillEta.textContent  = "ETA: —";
+    setPillState("Ready");
+    btnNav.disabled = true;
+  };
+
+  // SW for app shell (not tiles)
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("./sw.js").catch(()=>{});
+  }
 </script>
 </body>
 </html>
